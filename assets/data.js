@@ -55,6 +55,23 @@ function setFinnhubKey(key) {
   } catch (e) { /* ignoré */ }
 }
 
+/* Mêmes principes pour deux sources optionnelles supplémentaires :
+   - Twelve Data  → vrais indices (SPX, IXIC, DJI…), pas des ETF proxys.
+   - Marketaux    → actualités financières nativement en français, avec
+                    un score de sentiment réel par article (au lieu de
+                    l'heuristique par mots-clés utilisée en dernier recours). */
+const TWELVEDATA_KEY_STORAGE = "mit_twelvedata_key";
+const MARKETAUX_KEY_STORAGE = "mit_marketaux_key";
+
+function getTwelveDataKey() { try { return localStorage.getItem(TWELVEDATA_KEY_STORAGE) || ""; } catch (e) { return ""; } }
+function setTwelveDataKey(key) {
+  try { key ? localStorage.setItem(TWELVEDATA_KEY_STORAGE, key.trim()) : localStorage.removeItem(TWELVEDATA_KEY_STORAGE); } catch (e) {}
+}
+function getMarketauxKey() { try { return localStorage.getItem(MARKETAUX_KEY_STORAGE) || ""; } catch (e) { return ""; } }
+function setMarketauxKey(key) {
+  try { key ? localStorage.setItem(MARKETAUX_KEY_STORAGE, key.trim()) : localStorage.removeItem(MARKETAUX_KEY_STORAGE); } catch (e) {}
+}
+
 /* ------------------------------------------------------------------ Proxys */
 
 const PROXIES = [
@@ -233,6 +250,41 @@ async function fetchFX() {
   });
 }
 
+/* ----------------------------------------------- Indices via Twelve Data (réel) */
+/* Contrairement au plan gratuit de Finnhub, celui de Twelve Data donne accès
+   aux vrais indices (pas besoin de passer par un ETF comme proxy). Symboles
+   à confirmer/ajuster une fois une vraie clé en main (le plan gratuit peut
+   restreindre certains marchés) : si un symbole échoue, il est simplement
+   omis du tableau plutôt que de faire échouer tout le fetch. */
+const TWELVEDATA_SYMBOLS = [
+  { symbol: "SPX", label: "S&P 500" },
+  { symbol: "IXIC", label: "NASDAQ COMPOSITE" },
+  { symbol: "DJI", label: "DOW JONES" },
+  { symbol: "N225", label: "NIKKEI 225" },
+  { symbol: "XAU/USD", label: "OR" },
+  { symbol: "WTI/USD", label: "PÉTROLE WTI" },
+];
+
+async function fetchIndicesTwelveData(key) {
+  const results = await mapLimit(TWELVEDATA_SYMBOLS, 4, async ({ symbol, label }) => {
+    try {
+      const q = await fetchDirect(
+        `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbol)}&apikey=${key}`,
+        { asJson: true, timeout: 6000 }
+      );
+      const price = parseFloat(q.close);
+      const pct = parseFloat(q.percent_change);
+      if (!q || q.status === "error" || isNaN(price)) return null;
+      return { label, price, changePct: isNaN(pct) ? 0 : pct };
+    } catch (e) {
+      return null;
+    }
+  });
+  const clean = results.filter(Boolean);
+  if (!clean.length) throw new Error("Twelve Data: aucune cotation");
+  return clean;
+}
+
 /* -------------------------------------------------- Indices via Finnhub (réel) */
 /* Le plan gratuit de Finnhub ne donne pas accès aux indices bruts (^GSPC…),
    réservés aux offres payantes — on utilise donc des ETF liquides comme
@@ -278,10 +330,18 @@ const INDEX_SYMBOLS = [
 
 async function fetchIndices() {
   return withCache("indices", 60_000, 3_600_000, async () => {
-    const key = getFinnhubKey();
-    if (key) {
+    const tdKey = getTwelveDataKey();
+    if (tdKey) {
       try {
-        return await fetchIndicesFinnhub(key);
+        return await fetchIndicesTwelveData(tdKey);
+      } catch (e) {
+        /* clé invalide ou Twelve Data indisponible — on tente Finnhub puis Yahoo/proxy */
+      }
+    }
+    const fhKey = getFinnhubKey();
+    if (fhKey) {
+      try {
+        return await fetchIndicesFinnhub(fhKey);
       } catch (e) {
         /* clé invalide ou Finnhub indisponible — on retombe sur Yahoo/proxy */
       }
@@ -489,7 +549,78 @@ const FALLBACK_FEED = [
   },
 ];
 
+/* --------------------------------------------- Actualités via Marketaux (réel, FR) */
+/* Seule source d'actualités nativement en français plutôt que du contenu
+   anglais traduit/indexé — priorité la plus haute quand une clé est fournie.
+   Score de sentiment réel par entité (société/actif cité), utilisé pour
+   déduire l'impact plutôt que la simple détection de mots-clés. */
+const MARKETAUX_QUERIES = [
+  { q: "banque centrale OR taux directeur OR inflation", key: "BANQUES CENTRALES", baseline: "HIGH" },
+  { q: "géopolitique OR tensions OR sanctions", key: "GÉOPOLITIQUE", baseline: "HIGH" },
+  { q: "pétrole OR énergie OR OPEP", key: "ÉNERGIE", baseline: "MEDIUM" },
+  { q: "bourse OR actions OR marchés financiers", key: "MARCHÉS ACTIONS", baseline: "MEDIUM" },
+];
+
+function impactFromSentiment(sentimentScore, baseline) {
+  if (typeof sentimentScore !== "number") return baseline;
+  const mag = Math.abs(sentimentScore);
+  if (mag >= 0.6) return "CRITICAL";
+  if (mag >= 0.35) return "HIGH";
+  if (mag >= 0.15) return "MEDIUM";
+  return "LOW";
+}
+
+async function fetchMarketauxCategory(key, cat) {
+  const url = `https://api.marketaux.com/v1/news/all?search=${encodeURIComponent(cat.q)}&language=fr&limit=8&api_token=${key}`;
+  const res = await fetchDirect(url, { asJson: true, timeout: 7000 });
+  const items = res?.data;
+  if (!Array.isArray(items) || !items.length) throw new Error("Marketaux: catégorie vide");
+  return items.map((it, i) => {
+    const entity = Array.isArray(it.entities) && it.entities[0];
+    const sentiment = entity ? entity.sentiment_score ?? entity.score : undefined;
+    return {
+      id: `mx-${cat.key}-${it.uuid || i}`,
+      category: cat.key,
+      impact: impactFromSentiment(sentiment, cat.baseline),
+      time: relativeTimeFr(it.published_at),
+      timestamp: Date.parse(it.published_at) || 0,
+      source: it.source || "Marketaux",
+      headline: it.title || "",
+      brief: it.description || it.snippet || "Aucun résumé fourni par la source.",
+      link: it.url || "#",
+      tags: [cat.key.split(" ")[0]],
+      live: true,
+    };
+  });
+}
+
+async function fetchIntelFeedMarketaux(key) {
+  const results = await mapLimit(MARKETAUX_QUERIES, 2, async (cat) => {
+    try {
+      return await fetchMarketauxCategory(key, cat);
+    } catch (e) {
+      return [];
+    }
+  });
+  const merged = results.flat();
+  if (!merged.length) throw new Error("Marketaux: aucune dépêche");
+  merged.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  return merged;
+}
+
 async function fetchIntelFeed() {
+  const mxKey = getMarketauxKey();
+  if (mxKey) {
+    try {
+      const feed = await fetchIntelFeedMarketaux(mxKey);
+      STATE.newsEngine = "marketaux";
+      STATE.sourceStatus.news = "live";
+      return feed;
+    } catch (e) {
+      /* clé invalide/épuisée ou Marketaux indisponible — on tente Finnhub puis le proxy */
+    }
+  }
+
   const key = getFinnhubKey();
   if (key) {
     try {

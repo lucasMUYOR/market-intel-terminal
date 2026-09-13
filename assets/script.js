@@ -155,14 +155,17 @@
   function renderSources() {
     const el = document.getElementById("sources");
     if (!el) return;
-    const engineLabel = { finnhub: "Finnhub", proxy: "Google Actu. (proxy)", archive: "Archive locale" }[STATE.newsEngine] || "…";
+    const engineLabel = { marketaux: "Marketaux (FR)", finnhub: "Finnhub", proxy: "Google Actu. (proxy)", archive: "Archive locale" }[STATE.newsEngine] || "…";
+    const idxEngine = getTwelveDataKey() ? "Twelve Data" : getFinnhubKey() ? "Finnhub (ETF)" : "Yahoo (proxy)";
     const rows = [
       ["Actualités", engineLabel],
       ["Crypto", STATE.sourceStatus.crypto || "…"],
       ["Change", STATE.sourceStatus.fx || "…"],
-      ["Indices", STATE.sourceStatus.indices || "…"],
+      ["Indices", `${STATE.sourceStatus.indices || "…"} (${idxEngine})`],
       ["VIX", STATE.sourceStatus.vix || "…"],
-      ["Clé Finnhub", getFinnhubKey() ? "configurée" : "absente (voir console)"],
+      ["Clé finnhub", getFinnhubKey() ? "configurée" : "absente"],
+      ["Clé twelvedata", getTwelveDataKey() ? "configurée" : "absente"],
+      ["Clé marketaux", getMarketauxKey() ? "configurée" : "absente"],
     ];
     el.innerHTML = `<table class="dtable"><tbody>${rows.map(([k, v]) => `<tr><td class="lbl">${escapeHtml(k)}</td><td class="num muted">${escapeHtml(v)}</td></tr>`).join("")}</tbody></table>`;
   }
@@ -236,7 +239,7 @@
       currentFeed = await fetchIntelFeed();
       renderFilters();
       renderFeed();
-      const engineLabel = { finnhub: "Finnhub", proxy: "Google Actualités" }[STATE.newsEngine] || "direct";
+      const engineLabel = { marketaux: "Marketaux (FR)", finnhub: "Finnhub", proxy: "Google Actualités" }[STATE.newsEngine] || "direct";
       statusEl.innerHTML = `<i class="dot on"></i>${currentFeed.length} dépêches — ${engineLabel}`;
     } catch (e) {
       STATE.sourceStatus.news = "offline";
@@ -308,16 +311,23 @@
     setInterval(() => { pushLog(TERMINAL_LOG_LINES[i % TERMINAL_LOG_LINES.length]); i++; }, 5000);
   }
 
+  const KEY_SERVICES = {
+    finnhub: { get: getFinnhubKey, set: setFinnhubKey, info: "finnhub.io/register" },
+    twelvedata: { get: getTwelveDataKey, set: setTwelveDataKey, info: "twelvedata.com/pricing" },
+    marketaux: { get: getMarketauxKey, set: setMarketauxKey, info: "marketaux.com" },
+  };
+
   const COMMANDS = {
     aide: () => [
-      "commandes : aide, statut, actualiser, niveau, cle <clé finnhub>, effacer, propos",
+      "commandes : aide, statut, actualiser, niveau, cle [service] <clé>, effacer, propos",
+      "services pour 'cle' : finnhub (défaut), twelvedata, marketaux — ex: cle marketaux VOTRE_CLE",
     ],
     statut: () => {
       const s = STATE.sourceStatus;
       return [
         `actualités : ${STATE.newsEngine || "…"}`,
         `crypto : ${s.crypto || "…"} · change : ${s.fx || "…"} · indices : ${s.indices || "…"} · vix : ${s.vix || "…"}`,
-        `clé finnhub : ${getFinnhubKey() ? "configurée" : "absente"}`,
+        ...Object.entries(KEY_SERVICES).map(([name, svc]) => `clé ${name} : ${svc.get() ? "configurée" : "absente"}`),
       ];
     },
     actualiser: () => { refreshAll(); return ["resynchronisation lancée."]; },
@@ -326,16 +336,29 @@
       "seuils VIX : <14 FAIBLE · 14-19 SURVEILLÉ · 19-25 ÉLEVÉ · 25-35 SÉVÈRE · >35 CRITIQUE",
     ],
     cle: (arg) => {
-      if (!arg) return [`clé finnhub actuelle : ${getFinnhubKey() ? "configurée (masquée)" : "absente"}`, "usage : cle VOTRE_CLE  (obtenir une clé gratuite sur finnhub.io/register)"];
-      setFinnhubKey(arg);
+      const parts = arg.split(/\s+/).filter(Boolean);
+      if (!parts.length) {
+        return [
+          "usage : cle [finnhub|twelvedata|marketaux] <clé>   (service par défaut : finnhub)",
+          ...Object.entries(KEY_SERVICES).map(([name, svc]) => `  ${name.padEnd(11, " ")} ${svc.get() ? "configurée" : "absente"} — ${svc.info}`),
+        ];
+      }
+      let service = "finnhub", key;
+      if (parts.length >= 2 && KEY_SERVICES[parts[0].toLowerCase()]) {
+        service = parts[0].toLowerCase();
+        key = parts.slice(1).join(" ");
+      } else {
+        key = parts.join(" ");
+      }
+      KEY_SERVICES[service].set(key);
       refreshAll();
-      return ["clé enregistrée localement (ce navigateur uniquement). resynchronisation en cours..."];
+      return [`clé ${service} enregistrée localement (ce navigateur uniquement). resynchronisation en cours...`];
     },
     effacer: () => { const log = document.getElementById("term-log"); if (log) log.innerHTML = ""; return []; },
     propos: () => [
       "INTEL MARCHÉS // CLASSIFIÉ — veille financière temps réel.",
-      "sources : Finnhub (ou Google Actualités en repli), CoinGecko, Frankfurter/BCE, Yahoo Finance.",
-      "pas un conseil en investissement.",
+      "sources : Marketaux/Finnhub (ou Google Actualités en repli), Twelve Data/Finnhub/Yahoo pour les indices,",
+      "CoinGecko, Frankfurter/BCE. pas un conseil en investissement.",
     ],
   };
 
@@ -378,8 +401,11 @@
     wireTerminalInput();
     renderSources();
 
-    if (!getFinnhubKey()) {
-      pushLog('astuce : "cle VOTRE_CLE" avec une clé gratuite de finnhub.io/register pour des actualités garanties.');
+    if (!getMarketauxKey() && !getFinnhubKey()) {
+      pushLog('astuce : "cle marketaux VOTRE_CLE" (actus en FR) ou "cle VOTRE_CLE" (finnhub) — clés gratuites.');
+    }
+    if (!getTwelveDataKey()) {
+      pushLog('astuce : "cle twelvedata VOTRE_CLE" pour de vrais indices (pas des ETF proxys).');
     }
 
     await refreshAll();
