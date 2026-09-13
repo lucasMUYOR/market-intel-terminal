@@ -4,100 +4,95 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>INTEL MARCHÉS // CLASSIFIÉ</title>
-<meta name="description" content="Terminal de renseignement financier et géopolitique en temps réel — actualités, marchés crypto, indices, taux de change et calendrier macro, agrégés en direct depuis des sources publiques." />
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Black+Ops+One&display=swap" rel="stylesheet">
+<meta name="description" content="Terminal de renseignement financier en temps réel — actualités, marchés crypto, indices, taux de change et calendrier macro, agrégés en direct depuis des sources publiques." />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/style.css" />
 </head>
 <body>
 
-<canvas id="matrix-canvas"></canvas>
-<div class="scanlines"></div>
-<div class="vignette"></div>
-
-<div id="boot-screen">
-  <pre id="boot-text"></pre>
-</div>
-
-<div class="app" id="app" hidden>
+<div class="app" id="app">
 
   <!-- EN-TÊTE -->
   <header class="topbar">
-    <div class="brand">
-      <span class="brand-glitch" data-text="INTEL MARCHÉS">INTEL MARCHÉS</span>
-      <span class="brand-sub">// CLASSIFIÉ — ACCÈS RESTREINT</span>
-    </div>
+    <div class="brand">INTEL MARCHÉS <span class="brand-sep">//</span> CLASSIFIÉ</div>
     <div class="status-cluster">
-      <div class="status-item">
-        <span class="dot dot-live" id="global-dot"></span> FLUX <b id="global-status">CONNEXION…</b>
-      </div>
-      <div class="status-item" id="clock">--:--:--Z</div>
-      <div class="status-item">SESSION : <b id="session-id">ANON-0000</b></div>
+      <span class="status-item"><i class="dot" id="global-dot"></i><b id="global-status">CONNEXION…</b></span>
+      <span class="status-item" id="clock">--:--:--Z</span>
+      <span class="status-item">RISQUE : <b id="threat-value">—</b></span>
+      <span class="status-item">SESSION <b id="session-id">ANON-0000</b></span>
     </div>
   </header>
 
   <!-- TICKER -->
   <div class="ticker-wrap">
     <div class="ticker-track" id="ticker-track">
-      <div class="tick-item"><span class="lbl">CHARGEMENT DES COTATIONS EN DIRECT</span><span class="cursor">_</span></div>
+      <div class="tick-item"><span class="lbl">CHARGEMENT DES COTATIONS…</span></div>
     </div>
   </div>
 
-  <!-- JAUGE DE RISQUE -->
-  <section class="threat-bar">
-    <span class="threat-label">INDICE DE RISQUE MARCHÉ <span class="src-tag">(calculé sur le VIX en direct)</span></span>
-    <div class="threat-segments" id="threat-segments"></div>
-    <span class="threat-value" id="threat-value">—</span>
-  </section>
-
   <main class="grid">
 
-    <!-- FLUX DE RENSEIGNEMENT -->
-    <section class="panel feed-panel">
+    <!-- COLONNE GAUCHE -->
+    <aside class="col col-left">
+
+      <section class="panel">
+        <div class="panel-head"><h2>AGENDA MACRO</h2></div>
+        <div class="table-wrap" id="watchlist"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>POINTS CHAUDS</h2></div>
+        <div class="table-wrap" id="hotspots"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>SOURCES</h2></div>
+        <div class="table-wrap" id="sources"></div>
+      </section>
+
+    </aside>
+
+    <!-- COLONNE CENTRALE : FLUX -->
+    <section class="col col-main panel">
       <div class="panel-head">
-        <h2>&gt; FLUX D'ACTUALITÉS</h2>
-        <span class="panel-tag" id="feed-status"><span class="dot dot-live"></span> EN DIRECT — GOOGLE ACTUALITÉS</span>
+        <h2>FLUX D'ACTUALITÉS</h2>
+        <span class="panel-tag" id="feed-status">connexion…</span>
       </div>
       <div class="filter-row" id="filter-row"></div>
-      <div class="feed-list" id="feed-list">
-        <div class="loading-line">■ interrogation des flux réels<span class="cursor">_</span></div>
+      <div class="feed-table" id="feed-list">
+        <div class="loading-line">interrogation des sources réelles…</div>
       </div>
     </section>
 
-    <!-- BARRE LATÉRALE -->
-    <aside class="sidebar">
+    <!-- COLONNE DROITE : MARCHÉS -->
+    <aside class="col col-right">
 
-      <div class="panel">
-        <div class="panel-head">
-          <h2>&gt; AGENDA MACRO</h2>
-          <span class="panel-tag">DATES RÉELLES — FED / BCE</span>
-        </div>
-        <div class="watchlist" id="watchlist"></div>
-      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>INDICES</h2></div>
+        <div class="table-wrap" id="tbl-indices"></div>
+      </section>
 
-      <div class="panel">
-        <div class="panel-head">
-          <h2>&gt; CARTE DES POINTS CHAUDS</h2>
-          <span class="panel-tag">RISQUE GÉOPOLITIQUE</span>
-        </div>
-        <div class="map-wrap" id="map-wrap"></div>
-      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>CRYPTO</h2></div>
+        <div class="table-wrap" id="tbl-crypto"></div>
+      </section>
 
-      <div class="panel terminal-panel">
-        <div class="panel-head">
-          <h2>&gt; CONSOLE SYSTÈME</h2>
-          <span class="panel-tag blink">REC ●</span>
-        </div>
-        <div class="term-log" id="term-log"></div>
-        <form class="term-input-row" id="term-form">
-          <span class="term-prompt">root@intel-marches:~$</span>
-          <input class="term-input" id="term-input" type="text" autocomplete="off" spellcheck="false" placeholder="tapez 'aide' pour les commandes" />
-        </form>
-      </div>
+      <section class="panel">
+        <div class="panel-head"><h2>CHANGE (BASE EUR)</h2></div>
+        <div class="table-wrap" id="tbl-fx"></div>
+      </section>
 
     </aside>
   </main>
+
+  <!-- CONSOLE -->
+  <section class="console">
+    <div class="term-log" id="term-log"></div>
+    <form class="term-input-row" id="term-form">
+      <span class="term-prompt">root@intel-marches:~$</span>
+      <input class="term-input" id="term-input" type="text" autocomplete="off" spellcheck="false" placeholder="aide" />
+    </form>
+  </section>
 
   <footer class="footer">
     <span>NON CLASSIFIÉ // VEILLE SITUATIONNELLE UNIQUEMENT — DONNÉES PUBLIQUES EN TEMPS RÉEL, PAS UN CONSEIL EN INVESTISSEMENT</span>

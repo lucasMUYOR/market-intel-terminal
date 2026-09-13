@@ -1,26 +1,49 @@
 # INTEL MARCHÉS // CLASSIFIÉ
 
-A classified-intelligence-terminal styled dashboard (glitch title, scanlines,
-matrix rain, a DEFCON-style risk gauge, a hotspot map, a live ticker, and an
-interactive command-line console) for tracking news and data that moves
-financial markets. **The site's UI is in French.** This README (developer
-docs) is in English.
+A dense, minimal financial-intelligence terminal — flat black, monospace,
+tables instead of glossy cards, an auto-scrolling ticker, and a real
+interactive command-line console. **The site's UI is in French.** This
+README (developer docs) is in English.
 
-Unlike the first version, this one is wired to **real, live public data** —
-no sample placeholders in production:
+No sample placeholders in production — everything renders from real, live
+public data:
 
 | Data | Source | Notes |
 |---|---|---|
-| Headlines (8 categories) | Google Actualités (RSS), `hl=fr` | Real, clickable, refreshed every 5 min |
-| Crypto prices (BTC/ETH/SOL/XRP) | CoinGecko | Real, refreshed every 60 s |
-| FX rates (EUR→USD/GBP/JPY/CHF) | Frankfurter.dev (ECB reference rates) | Real, daily |
-| Indices, VIX, oil, gold | Yahoo Finance chart API | Real, refreshed every 60 s |
-| Risk gauge | Computed live from the VIX | Not a fixed value — see thresholds below |
-| Macro calendar (Fed/ECB/NFP/CPI) | Hardcoded, but from verified real dates | See sources at the bottom of `data.js` |
-| Hotspot map | Curated editorial list | Static — not a live feed |
+| Headlines (4 categories) | **Finnhub** if a free API key is set, else Google Actualités (RSS) via proxy | Real, clickable, refreshed every 5 min |
+| Crypto prices (BTC/ETH/SOL/XRP) | CoinGecko | Real, refreshed every 60 s, no key |
+| FX rates (EUR→USD/GBP/JPY/CHF) | Frankfurter.dev (ECB reference rates) | Real, daily, no key |
+| Indices/commodities | Finnhub (ETF proxies: SPY/QQQ/DIA/GLD/USO) if key set, else Yahoo Finance via proxy | Real, refreshed every 60 s |
+| VIX / risk gauge | Yahoo Finance via proxy, dedicated single request | Computed live — see thresholds below |
+| Macro calendar (Fed/ECB/NFP/CPI) | Hardcoded, from verified real dates | See sources at the bottom of this doc |
+| Hotspot table | Curated editorial list | Static, not a live feed |
 
-No API keys required for any of this — all sources are free, public, no-auth
-endpoints. That's also the one real caveat, explained below.
+## Get a free Finnhub key (recommended — fixes news reliability)
+
+The single biggest reliability issue this project has is that **Google News
+RSS and Yahoo Finance don't send CORS headers**, so a static site can't call
+them directly — this build routes around that with a chain of free public
+CORS proxies, and those proxies have no uptime guarantee. In testing, all
+three went down simultaneously more than once.
+
+**Finnhub (finnhub.io) is a real API built for direct browser calls** — it
+sends `Access-Control-Allow-Origin: *` on every response, no proxy needed,
+so it doesn't share that failure mode. Free tier, no credit card, 60
+requests/minute:
+
+1. Sign up at **https://finnhub.io/register** (30 seconds)
+2. Copy your API key from the dashboard
+3. Open the site, click into the console at the bottom, and type:
+   ```
+   cle VOTRE_CLE_ICI
+   ```
+4. It's saved in that browser's `localStorage` — never sent anywhere except
+   directly to Finnhub — and the terminal resyncs immediately using it for
+   both news and market quotes.
+
+Without a key, the terminal still works via the free proxy-routed fallback,
+but expect it to occasionally show the "ARCHIVE LOCALE" fallback feed when
+the public proxies are having a bad day (they periodically are).
 
 ## Run it
 
@@ -34,61 +57,49 @@ python3 -m http.server 8000
 ## Architecture
 
 ```
-index.html          Page structure (French UI strings)
-assets/style.css     Visual system + the new terminal-console input styling
+index.html          Page structure (French UI strings), dense 3-column grid
+assets/style.css     Flat/minimal terminal styling — no gradients, glow,
+                       rounded corners, or decorative animation
 assets/script.js      Rendering, refresh loops, VIX-based risk gauge,
-                       command-line console (aide/statut/actualiser/...)
-assets/data.js         All data fetching: proxy chain, caching, per-source
-                       fetchXxx() functions, the hardcoded macro calendar
+                       command-line console (aide/statut/actualiser/cle/...)
+assets/data.js         All data fetching: Finnhub, CoinGecko, Frankfurter,
+                       Yahoo-via-proxy fallback, caching, the macro calendar
 ```
 
-### Why a CORS proxy chain?
+### Reliability layers (why it should never look "empty")
 
-Google News RSS, and Yahoo Finance's chart API, don't send
-`Access-Control-Allow-Origin` headers, so a browser can't call them directly
-from a static site. `assets/data.js` routes those two sources through a
-small chain of free public CORS proxies (`api.allorigins.win`,
-`api.codetabs.com`, `cors.eu.org`), tried in order, each with a timeout and
-one retry pass. CoinGecko and Frankfurter.dev *do* send proper CORS headers,
-so those are called directly — no proxy needed.
+1. **Finnhub first, when a key is configured** — a real CORS-enabled API,
+   not scraped through a proxy, so it just works.
+2. **Google Actualités via a proxy chain as fallback** — 3 public CORS
+   proxies (`api.allorigins.win`, `api.codetabs.com`, `cors.eu.org`), tried
+   in order, each with a timeout and one retry pass, and a global
+   concurrency semaphore (`PROXY_CONCURRENCY = 2` in `data.js`) so no more
+   than 2 proxy requests are ever in flight at once across the whole page.
+3. **`localStorage` caching per source** — a successful fetch is cached; if
+   the next live fetch fails, the last good value is served instead and the
+   UI marks it accordingly.
+4. **A tiny bundled French fallback feed** (`FALLBACK_FEED` in `data.js`) —
+   shown only if live *and* cache are both empty, clearly labeled `ARCHIVE
+   LOCALE` so it's never mistaken for live content.
 
-**These proxies are free, third-party, and have no uptime guarantee.** In
-testing they mostly worked well, but occasionally returned 500s or briefly
-rate-limited under bursts of concurrent requests. The code defends against
-this on three levels:
-
-1. **A global concurrency semaphore** (`PROXY_CONCURRENCY = 2` in
-   `data.js`) — at most 2 proxy requests are ever in flight at once, across
-   *all* features combined, so indices and news don't stampede the proxy
-   together on page load.
-2. **`localStorage` caching per source** — a successful fetch is cached;
-   if the next live fetch fails, the last good value (up to a few hours
-   old) is served instead, and the UI marks it "CACHE" rather than "EN
-   DIRECT".
-3. **A tiny bundled French fallback feed** (`FALLBACK_FEED` in `data.js`)
-   — shown only if both the live fetch and the cache are empty (e.g. first
-   visit, proxies down), clearly labeled `ARCHIVE LOCALE` so it's never
-   mistaken for live content.
-
-For a production deployment where reliability matters more, swap the proxy
-chain for a small serverless function you control (Cloudflare Worker,
-Vercel/Netlify function) that fetches these feeds server-side — same shape
-of data, no dependency on third-party CORS proxies.
+For a production deployment where reliability matters even more, swap the
+proxy fallback for a small serverless function you control (Cloudflare
+Worker, Vercel/Netlify function) — same shape of data, zero dependency on
+third-party CORS proxies.
 
 ### The console
 
-The "CONSOLE SYSTÈME" panel is a real command line, not just decoration.
-Type into it:
+The console panel at the bottom is a real command line:
 
 - `aide` — list commands
 - `statut` — live/cache/offline status of every data source
 - `actualiser` — force a full resync
 - `niveau` — explains the current risk level and its VIX thresholds
-- `matrice` — toggles the matrix-rain intensity
+- `cle <clé>` — set your Finnhub API key (see above)
 - `effacer` — clears the console
 - `propos` — about this terminal
 
-### Risk gauge thresholds (VIX-based)
+### Risk gauge thresholds (real VIX)
 
 ```
 VIX < 14        → FAIBLE      (LOW)
@@ -97,6 +108,8 @@ VIX < 14        → FAIBLE      (LOW)
 25 ≤ VIX < 35   → SÉVÈRE      (HIGH)
 VIX ≥ 35        → CRITIQUE    (SEVERE)
 ```
+Fetched as a single dedicated request (not bundled with the indices table)
+to stay light on the proxy chain — it's the one number the risk gauge needs.
 
 ### Macro calendar dates
 
@@ -117,5 +130,8 @@ Pages → Deploy from branch.
 
 This aggregates real public headlines and market data for situational
 awareness — it is not a licensed data terminal and not investment advice.
-Google News RSS results reflect whatever Google's index surfaces for each
-query; always check the linked source before acting on anything.
+Finnhub/Google News results reflect whatever each source surfaces for each
+query/category; always check the linked source before acting on anything.
+The indices table uses liquid ETFs (SPY, QQQ, DIA, GLD, USO) as proxies for
+the underlying indices/commodities when using Finnhub's free tier, which
+doesn't include raw index quotes.

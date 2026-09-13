@@ -28,7 +28,32 @@ const THREAT_LEVELS = ["FAIBLE", "SURVEILLÉ", "ÉLEVÉ", "SÉVÈRE", "CRITIQUE"
 const STATE = {
   threatLevel: 2,
   sourceStatus: {}, // { key: "live" | "cache" | "offline" }
+  newsEngine: null, // "finnhub" | "proxy" | "archive" — quelle source a fourni le flux affiché
 };
+
+/* --------------------------------------------------------------- Clé Finnhub */
+/* Finnhub (finnhub.io) est une vraie API pensée pour l'appel direct depuis
+   un navigateur : elle renvoie Access-Control-Allow-Origin: * même sur les
+   réponses d'erreur. Contrairement à un scraping RSS via proxy public, elle
+   ne dépend d'aucune infrastructure tierce fragile. Inscription gratuite,
+   sans carte bancaire, 60 requêtes/minute. Sans clé, le terminal retombe
+   automatiquement sur le flux Google Actualités via proxy (moins fiable),
+   puis sur l'archive locale. */
+const FINNHUB_KEY_STORAGE = "mit_finnhub_key";
+
+function getFinnhubKey() {
+  try {
+    return localStorage.getItem(FINNHUB_KEY_STORAGE) || "";
+  } catch (e) {
+    return "";
+  }
+}
+function setFinnhubKey(key) {
+  try {
+    if (key) localStorage.setItem(FINNHUB_KEY_STORAGE, key.trim());
+    else localStorage.removeItem(FINNHUB_KEY_STORAGE);
+  } catch (e) { /* ignoré */ }
+}
 
 /* ------------------------------------------------------------------ Proxys */
 
@@ -208,6 +233,37 @@ async function fetchFX() {
   });
 }
 
+/* -------------------------------------------------- Indices via Finnhub (réel) */
+/* Le plan gratuit de Finnhub ne donne pas accès aux indices bruts (^GSPC…),
+   réservés aux offres payantes — on utilise donc des ETF liquides comme
+   proxys directement comparables (SPY suit le S&P 500 à un facteur ~10 près,
+   etc.), avec la mention de l'ETF affichée pour rester honnête. */
+const FINNHUB_QUOTE_SYMBOLS = [
+  { symbol: "SPY", label: "S&P 500 (SPY)" },
+  { symbol: "QQQ", label: "NASDAQ 100 (QQQ)" },
+  { symbol: "DIA", label: "DOW JONES (DIA)" },
+  { symbol: "GLD", label: "OR (GLD)" },
+  { symbol: "USO", label: "PÉTROLE (USO)" },
+];
+
+async function fetchIndicesFinnhub(key) {
+  const results = await mapLimit(FINNHUB_QUOTE_SYMBOLS, 3, async ({ symbol, label }) => {
+    try {
+      const q = await fetchDirect(
+        `https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${key}`,
+        { asJson: true, timeout: 6000 }
+      );
+      if (typeof q.c !== "number" || q.c === 0) return null;
+      return { label, price: q.c, changePct: q.dp ?? 0 };
+    } catch (e) {
+      return null;
+    }
+  });
+  const clean = results.filter(Boolean);
+  if (!clean.length) throw new Error("Finnhub: aucune cotation");
+  return clean;
+}
+
 /* --------------------------------------------------------- Indices (réel) */
 
 const INDEX_SYMBOLS = [
@@ -216,13 +272,20 @@ const INDEX_SYMBOLS = [
   { symbol: "%5EDJI", label: "DOW JONES" },
   { symbol: "%5EFCHI", label: "CAC 40" },
   { symbol: "%5EN225", label: "NIKKEI 225" },
-  { symbol: "%5EVIX", label: "VIX" },
   { symbol: "CL%3DF", label: "PÉTROLE WTI" },
   { symbol: "GC%3DF", label: "OR" },
 ];
 
 async function fetchIndices() {
   return withCache("indices", 60_000, 3_600_000, async () => {
+    const key = getFinnhubKey();
+    if (key) {
+      try {
+        return await fetchIndicesFinnhub(key);
+      } catch (e) {
+        /* clé invalide ou Finnhub indisponible — on retombe sur Yahoo/proxy */
+      }
+    }
     const results = await mapLimit(INDEX_SYMBOLS, 3, async ({ symbol, label }) => {
       try {
         const data = await fetchViaProxies(
@@ -244,6 +307,23 @@ async function fetchIndices() {
     const clean = results.filter(Boolean);
     if (!clean.length) throw new Error("Aucun indice récupéré");
     return clean;
+  });
+}
+
+/* ----------------------------------------------------- VIX pour la jauge de risque */
+/* Requête isolée et unique (pas mêlée aux 5-8 requêtes du tableau d'indices)
+   pour rester légère sur la chaîne de proxys — c'est la seule valeur dont la
+   jauge de risque a besoin. Note : un ETN comme VIXY n'a PAS la même échelle
+   que l'indice VIX réel, donc on va chercher le vrai ^VIX, pas un proxy ETF. */
+async function fetchVix() {
+  return withCache("vix", 60_000, 3_600_000, async () => {
+    const data = await fetchViaProxies(
+      "https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX",
+      { asJson: true, timeout: 8000 }
+    );
+    const meta = data?.chart?.result?.[0]?.meta;
+    if (!meta || typeof meta.regularMarketPrice !== "number") throw new Error("VIX indisponible");
+    return { price: meta.regularMarketPrice, changePct: meta.regularMarketChangePercent ?? 0 };
   });
 }
 
@@ -314,6 +394,55 @@ function parseGoogleNewsRSS(xmlText, category) {
   });
 }
 
+/* Catégories Finnhub → étiquette française affichée + baseline d'impact.
+   Finnhub renvoie ses dépêches en anglais (sources Reuters/AP/etc.) — le
+   contenu reste réel et à jour, seule la langue de la dépêche elle-même
+   n'est pas traduite (aucune traduction automatique fiable sans clé tierce). */
+const FINNHUB_CATEGORIES = [
+  { finnhub: "general", key: "ACTUALITÉS GÉNÉRALES", baseline: "MEDIUM" },
+  { finnhub: "forex", key: "CHANGE & TAUX", baseline: "HIGH" },
+  { finnhub: "crypto", key: "CRYPTO", baseline: "MEDIUM" },
+  { finnhub: "merger", key: "FUSIONS & ACQUISITIONS", baseline: "MEDIUM" },
+];
+
+function relativeTimeFrFromEpoch(epochSeconds) {
+  if (!epochSeconds) return "";
+  return relativeTimeFr(new Date(epochSeconds * 1000).toISOString());
+}
+
+async function fetchFinnhubCategory(key, cat) {
+  const url = `https://finnhub.io/api/v1/news?category=${cat.finnhub}&token=${key}`;
+  const items = await fetchDirect(url, { asJson: true, timeout: 7000 });
+  if (!Array.isArray(items) || !items.length) throw new Error("Finnhub: catégorie vide");
+  return items.slice(0, 8).map((it, i) => ({
+    id: `fh-${cat.finnhub}-${it.id || i}`,
+    category: cat.key,
+    impact: scoreImpact(it.headline || "", cat.baseline),
+    time: relativeTimeFrFromEpoch(it.datetime),
+    timestamp: (it.datetime || 0) * 1000,
+    source: it.source || "Finnhub",
+    headline: it.headline || "",
+    brief: it.summary || "Aucun résumé fourni par la source.",
+    link: it.url || "#",
+    tags: [cat.key.split(" ")[0].replace(/[&,]/g, "")],
+    live: true,
+  }));
+}
+
+async function fetchIntelFeedFinnhub(key) {
+  const results = await mapLimit(FINNHUB_CATEGORIES, 2, async (cat) => {
+    try {
+      return await fetchFinnhubCategory(key, cat);
+    } catch (e) {
+      return [];
+    }
+  });
+  const merged = results.flat();
+  if (!merged.length) throw new Error("Finnhub: aucune dépêche");
+  merged.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  return merged;
+}
+
 async function fetchNewsCategory(category) {
   const url = `https://news.google.com/rss/search?q=${encodeURIComponent(category.query)}&hl=fr&gl=FR&ceid=FR:fr`;
   return withCache(`news_${category.key}`, 5 * 60_000, 6 * 3_600_000, async () => {
@@ -361,6 +490,18 @@ const FALLBACK_FEED = [
 ];
 
 async function fetchIntelFeed() {
+  const key = getFinnhubKey();
+  if (key) {
+    try {
+      const feed = await fetchIntelFeedFinnhub(key);
+      STATE.newsEngine = "finnhub";
+      STATE.sourceStatus.news = "live";
+      return feed;
+    } catch (e) {
+      /* clé invalide/épuisée ou Finnhub indisponible — on retombe sur le proxy */
+    }
+  }
+
   const results = await mapLimit(NEWS_CATEGORIES, 3, async (cat) => {
     try {
       return await fetchNewsCategory(cat);
@@ -371,6 +512,8 @@ async function fetchIntelFeed() {
   const merged = results.flat();
   if (!merged.length) throw new Error("Toutes les catégories ont échoué");
   merged.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  STATE.newsEngine = "proxy";
+  STATE.sourceStatus.news = "live";
   return merged;
 }
 
@@ -403,14 +546,12 @@ const HOTSPOTS = [
 /* -------------------------------------------------------------- Journal système */
 
 const TERMINAL_LOG_LINES = [
-  "connexion au flux Google Actualités...",
+  "requête Finnhub / Google Actualités...",
   "requête CoinGecko [BTC, ETH, SOL, XRP]...",
   "synchronisation taux de référence BCE (Frankfurter)...",
-  "récupération indices Yahoo Finance...",
-  "analyse lexicale des titres (FR) en cours...",
+  "récupération des indices...",
   "recalcul de l'indice de risque via le VIX...",
   "vérification du calendrier macro (Fed / BCE / BLS)...",
   "aucune anomalie détectée sur les flux...",
   "mise en cache locale des dernières données...",
-  "point de contrôle système écrit...",
 ];
