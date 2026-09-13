@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MARKET INTEL // CLASSIFIED</title>
+<meta name="description" content="Real-time-styled financial & geopolitical intelligence terminal — a classified-briefing-style dashboard for tracking market-moving news." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Black+Ops+One&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+
+<canvas id="matrix-canvas"></canvas>
+<div class="scanlines"></div>
+<div class="vignette"></div>
+
+<div id="boot-screen">
+  <pre id="boot-text"></pre>
+</div>
+
+<div class="app" id="app" hidden>
+
+  <!-- HEADER -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-glitch" data-text="MARKET INTEL">MARKET INTEL</span>
+      <span class="brand-sub">// CLASSIFIED — EYES ONLY</span>
+    </div>
+    <div class="status-cluster">
+      <div class="status-item">
+        <span class="dot dot-live"></span> LIVE FEED <b>ONLINE</b>
+      </div>
+      <div class="status-item" id="clock">--:--:--Z</div>
+      <div class="status-item">SESSION: <b id="session-id">ANON-0000</b></div>
+    </div>
+  </header>
+
+  <!-- TICKER -->
+  <div class="ticker-wrap">
+    <div class="ticker-track" id="ticker-track"></div>
+  </div>
+
+  <!-- THREAT GAUGE -->
+  <section class="threat-bar">
+    <span class="threat-label">GLOBAL MARKET RISK INDEX</span>
+    <div class="threat-segments" id="threat-segments"></div>
+    <span class="threat-value" id="threat-value">—</span>
+  </section>
+
+  <main class="grid">
+
+    <!-- INTEL FEED -->
+    <section class="panel feed-panel">
+      <div class="panel-head">
+        <h2>&gt; INTEL FEED</h2>
+        <span class="panel-tag">AUTO-REFRESH: ON</span>
+      </div>
+      <div class="filter-row" id="filter-row"></div>
+      <div class="feed-list" id="feed-list">
+        <div class="loading-line">■ decrypting feed<span class="cursor">_</span></div>
+      </div>
+    </section>
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>&gt; WATCHLIST</h2>
+          <span class="panel-tag">CATALYSTS</span>
+        </div>
+        <div class="watchlist" id="watchlist"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>&gt; HOTSPOT MAP</h2>
+          <span class="panel-tag">GEO-RISK</span>
+        </div>
+        <div class="map-wrap" id="map-wrap"></div>
+      </div>
+
+      <div class="panel terminal-panel">
+        <div class="panel-head">
+          <h2>&gt; SYSTEM LOG</h2>
+          <span class="panel-tag blink">REC ●</span>
+        </div>
+        <div class="term-log" id="term-log"></div>
+      </div>
+
+    </aside>
+  </main>
+
+  <footer class="footer">
+    <span>UNCLASSIFIED // FOR SITUATIONAL AWARENESS ONLY — SAMPLE DATA, NOT INVESTMENT ADVICE</span>
+    <span id="footer-clock"></span>
+  </footer>
+</div>
+
+<div class="brief-overlay" id="brief-overlay">
+  <div class="brief-card" id="brief-card"></div>
+</div>
+
+<script src="assets/data.js"></script>
+<script src="assets/script.js"></script>
+</body>
+</html>
