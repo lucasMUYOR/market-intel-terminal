@@ -1,192 +1,416 @@
 /* ==========================================================================
-   DATA LAYER — SAMPLE / DEMO FEED
+   COUCHE DE DONNÉES — SOURCES RÉELLES, EN DIRECT
    --------------------------------------------------------------------------
-   This file is intentionally isolated from rendering logic (script.js).
-   Replace `fetchIntelFeed()` with a real call to a news/market API and the
-   rest of the terminal keeps working unchanged, as long as you resolve to
-   an array of objects shaped like the SAMPLE_FEED entries below.
+   Ce fichier fait le pont entre des API publiques et gratuites (sans clé) et
+   l'interface (script.js). Chaque fonction fetchXxx() renvoie des données
+   réelles quand c'est possible, retombe sur un cache local (localStorage) en
+   cas d'échec réseau, puis sur un jeu de secours intégré en dernier recours
+   — le terminal ne doit jamais rester vide.
 
-   Suggested real sources (need your own API key, see README):
-     - NewsAPI.org            https://newsapi.org
-     - Finnhub (market news)  https://finnhub.io/docs/api/market-news
-     - GNews                  https://gnews.io
-     - Alpha Vantage News     https://www.alphavantage.co/documentation/#news-sentiment
-     - Any RSS feed, proxied through a CORS-friendly endpoint you control
+   Sources utilisées (toutes publiques, sans clé API) :
+     - Google Actualités (RSS)      → gros titres réels, multi-catégories
+     - CoinGecko                    → prix crypto en temps réel
+     - Frankfurter.dev (données BCE) → taux de change de référence
+     - Yahoo Finance (chart API)    → indices, VIX, pétrole, or
+     - Dates réelles de calendrier macro (Fed, BCE, NFP, CPI) — vérifiées via
+       federalreserve.gov / ecb.europa.eu / bls.gov, codées en dur car ce
+       sont des dates planifiées publiquement, pas des flux temps réel.
+
+   Comme la plupart de ces API ne renvoient pas d'en-têtes CORS utilisables
+   directement depuis un site statique, les requêtes passent par une chaîne
+   de proxys CORS publics (voir PROXIES). Ces proxys tiers peuvent tomber ou
+   être limités en débit — c'est pourquoi chaque fetch a un timeout, un
+   repli en cascade, et un cache local avec horodatage.
    ========================================================================== */
 
-const THREAT_LEVELS = ["LOW", "GUARDED", "ELEVATED", "HIGH", "SEVERE"];
+const THREAT_LEVELS = ["FAIBLE", "SURVEILLÉ", "ÉLEVÉ", "SÉVÈRE", "CRITIQUE"];
 
 const STATE = {
-  threatLevel: 3, // index into THREAT_LEVELS -> "HIGH"
+  threatLevel: 2,
+  sourceStatus: {}, // { key: "live" | "cache" | "offline" }
 };
 
-const SAMPLE_TICKER = [
-  { label: "S&P 500", value: "6,481.20", delta: "+0.34%", up: true },
-  { label: "NASDAQ", value: "21,904.55", delta: "+0.61%", up: true },
-  { label: "DOW", value: "44,918.02", delta: "-0.12%", up: false },
-  { label: "US10Y", value: "4.18%", delta: "+3bp", up: true },
-  { label: "DXY", value: "103.42", delta: "-0.22%", up: false },
-  { label: "WTI CRUDE", value: "$71.85", delta: "+1.94%", up: true },
-  { label: "GOLD", value: "$3,412.10", delta: "+0.87%", up: true },
-  { label: "BTC/USD", value: "$71,240", delta: "-2.15%", up: false },
-  { label: "VIX", value: "18.62", delta: "+6.3%", up: true },
-  { label: "EUR/USD", value: "1.0871", delta: "+0.09%", up: true },
-  { label: "NIKKEI 225", value: "39,884", delta: "+0.44%", up: true },
-  { label: "NATGAS", value: "$2.91", delta: "-1.05%", up: false },
+/* ------------------------------------------------------------------ Proxys */
+
+const PROXIES = [
+  (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  (url) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+  (url) => `https://cors.eu.org/${url}`,
 ];
 
-const SAMPLE_FEED = [
-  {
-    id: "f-001",
-    category: "CENTRAL BANKS",
-    impact: "CRITICAL",
-    time: "T-00:04:12",
-    source: "WIRE // FOMC",
-    headline: "Fed signals split on pace of cuts as core inflation prints hot for third month",
-    brief:
-      "Minutes reveal a divided committee. Futures now price a 58% chance of a hold in the next meeting, down from 74% a week ago. Rate-sensitive sectors (housing, small caps) are the fastest movers.",
-    tags: ["RATES", "USD", "EQUITIES"],
-  },
-  {
-    id: "f-002",
-    category: "GEOPOLITICS",
-    impact: "HIGH",
-    time: "T-00:11:47",
-    source: "SIGINT // REGIONAL DESK",
-    headline: "Tanker traffic through the Strait of Hormuz reroutes amid naval buildup",
-    brief:
-      "Insurance premiums on Gulf shipping routes jump. Brent-WTI spread widens. Watch energy majors and airline fuel hedges for second-order moves.",
-    tags: ["OIL", "SHIPPING", "ENERGY"],
-  },
-  {
-    id: "f-003",
-    category: "TRADE",
-    impact: "MEDIUM",
-    time: "T-00:22:03",
-    source: "WIRE // TRADE DESK",
-    headline: "New semiconductor export controls floated, targeting advanced-node equipment",
-    brief:
-      "Draft language still under interagency review. Chip equipment makers and foundries most exposed; downstream device makers see muted reaction so far.",
-    tags: ["SEMIS", "SUPPLY-CHAIN", "CHINA"],
-  },
-  {
-    id: "f-004",
-    category: "CRYPTO",
-    impact: "MEDIUM",
-    time: "T-00:31:55",
-    source: "ON-CHAIN // MONITOR",
-    headline: "Large exchange wallet moves $[REDACTED] in BTC to cold storage",
-    brief:
-      "On-chain analytics flag the transfer as consistent with routine custody rotation, not a sell signal — but derivatives desks are already repricing short-dated vol.",
-    tags: ["BTC", "DERIVATIVES", "VOLATILITY"],
-  },
-  {
-    id: "f-005",
-    category: "ENERGY",
-    impact: "HIGH",
-    time: "T-00:38:29",
-    source: "WIRE // OPEC WATCH",
-    headline: "OPEC+ delegates float larger-than-expected output increase for next quarter",
-    brief:
-      "If confirmed, this reverses months of restraint. Crude futures curve flattening; refiners and energy-heavy currencies (CAD, NOK, RUB proxies) in focus.",
-    tags: ["OPEC", "CRUDE", "FX"],
-  },
-  {
-    id: "f-006",
-    category: "EQUITIES",
-    impact: "MEDIUM",
-    time: "T-00:47:14",
-    source: "WIRE // EARNINGS DESK",
-    headline: "Mega-cap cloud provider beats on revenue, guides capex sharply higher for AI buildout",
-    brief:
-      "Street reaction split between margin-compression worries and top-line acceleration. Power/utility names tied to data-center demand rally in sympathy.",
-    tags: ["AI", "CAPEX", "MEGACAP"],
-  },
-  {
-    id: "f-007",
-    category: "GEOPOLITICS",
-    impact: "CRITICAL",
-    time: "T-00:55:02",
-    source: "SIGINT // ELECTIONS DESK",
-    headline: "Snap election called in key eurozone member state, coalition math uncertain",
-    brief:
-      "Sovereign CDS spreads widen intraday. Domestic banks and utilities most rate-sensitive to fiscal policy uncertainty. EUR crosses whip on headline algo triggers.",
-    tags: ["EUR", "SOVEREIGN-RISK", "POLITICS"],
-  },
-  {
-    id: "f-008",
-    category: "COMMODITIES",
-    impact: "LOW",
-    time: "T-01:08:41",
-    source: "WIRE // AG DESK",
-    headline: "Weather models shift favorable for key grain belt, yield estimates revised up",
-    brief:
-      "Front-month grain futures ease. Limited cross-asset spillover expected barring confirmation from next USDA report.",
-    tags: ["AGRICULTURE", "WEATHER"],
-  },
-  {
-    id: "f-009",
-    category: "CENTRAL BANKS",
-    impact: "MEDIUM",
-    time: "T-01:19:56",
-    source: "WIRE // ECB WATCH",
-    headline: "ECB officials push back on market pricing for near-term easing",
-    brief:
-      "Hawkish repricing across the front end of the EUR curve. Peripheral spreads (BTP-Bund) tick wider on reduced cut expectations.",
-    tags: ["ECB", "EUR", "RATES"],
-  },
-  {
-    id: "f-010",
-    category: "CYBER",
-    impact: "HIGH",
-    time: "T-01:34:10",
-    source: "SIGINT // CYBER DESK",
-    headline: "Financial-sector clearing utility discloses attempted intrusion, no funds affected",
-    brief:
-      "Disclosure timed with market close to limit reaction. Cybersecurity names see relative-strength bid; affected utility's counterparties reviewing exposure.",
-    tags: ["CYBERSECURITY", "INFRASTRUCTURE"],
-  },
-];
-
-const WATCHLIST = [
-  { label: "FOMC RATE DECISION", target: "2026-09-17T18:00:00Z", tag: "RATES" },
-  { label: "US CPI (AUG)", target: "2026-09-16T12:30:00Z", tag: "INFLATION" },
-  { label: "OPEC+ MEETING", target: "2026-09-20T09:00:00Z", tag: "ENERGY" },
-  { label: "ECB PRESS CONFERENCE", target: "2026-09-24T12:45:00Z", tag: "RATES" },
-  { label: "US NONFARM PAYROLLS", target: "2026-10-02T12:30:00Z", tag: "LABOR" },
-];
-
-const HOTSPOTS = [
-  { name: "STRAIT OF HORMUZ", x: 63.5, y: 44, note: "Oil shipping chokepoint — naval activity elevated", level: "HIGH" },
-  { name: "TAIWAN STRAIT", x: 79.5, y: 46, note: "Semiconductor supply-chain risk corridor", level: "MEDIUM" },
-  { name: "WASHINGTON D.C.", x: 27, y: 34, note: "Fed / fiscal policy nexus", level: "CRITICAL" },
-  { name: "BRUSSELS", x: 47.5, y: 27, note: "ECB policy + EU fiscal coordination", level: "MEDIUM" },
-  { name: "SUEZ CANAL", x: 54, y: 42, note: "Global trade chokepoint", level: "MEDIUM" },
-  { name: "SOUTH CHINA SEA", x: 77, y: 51, note: "Maritime trade route tension", level: "MEDIUM" },
-  { name: "MOSCOW", x: 56, y: 24, note: "Energy export policy risk", level: "HIGH" },
-];
-
-const TERMINAL_LOG_LINES = [
-  "connecting to wire services... OK",
-  "authenticating market data handshake... OK",
-  "streaming central bank comms channel...",
-  "cross-referencing headline vs. futures tape...",
-  "scanning options flow for anomalous skew...",
-  "correlating sovereign CDS with FX crosses...",
-  "flagging keyword cluster: [rates, inflation, hawkish]...",
-  "flagging keyword cluster: [oil, strait, shipping]...",
-  "updating global risk index...",
-  "no anomalies detected in clearing infrastructure...",
-  "resyncing threat level gauge...",
-  "archive checkpoint written...",
-];
+function withTimeout(promise, ms) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return { promise: promise(ctrl.signal), ctrl, cleanup: () => clearTimeout(timer) };
+}
 
 /**
- * Swap this for a real fetch() to a live news/market API.
- * Must resolve to an array shaped like SAMPLE_FEED.
+ * Verrou global (toutes sources confondues) limitant le nombre de requêtes
+ * simultanées envoyées aux proxys CORS publics. Ces proxys gratuits et
+ * partagés tolèrent mal les rafales — même si chaque fonction (indices,
+ * actualités, …) limite déjà sa propre concurrence, elles peuvent toutes
+ * se déclencher en même temps au chargement de la page. Ce sémaphore
+ * garantit qu'au plus PROXY_CONCURRENCY requêtes proxy sont en vol, quelle
+ * que soit la source qui les a demandées.
  */
-async function fetchIntelFeed() {
-  return new Promise((resolve) => {
-    setTimeout(() => resolve(SAMPLE_FEED), 400);
+const PROXY_CONCURRENCY = 2;
+let proxyActive = 0;
+const proxyQueue = [];
+function acquireProxySlot() {
+  if (proxyActive < PROXY_CONCURRENCY) {
+    proxyActive++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => proxyQueue.push(resolve));
+}
+function releaseProxySlot() {
+  const next = proxyQueue.shift();
+  if (next) next();
+  else proxyActive--;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function tryAllProxiesOnce(url, asJson, timeout) {
+  let lastErr;
+  for (const build of PROXIES) {
+    const target = build(url);
+    const { promise, cleanup } = withTimeout((signal) => fetch(target, { signal }), timeout);
+    try {
+      const res = await promise;
+      cleanup();
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return asJson ? await res.json() : await res.text();
+    } catch (err) {
+      cleanup();
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("Tous les proxys ont échoué");
+}
+
+async function fetchViaProxies(url, { asJson = false, timeout = 8000 } = {}) {
+  await acquireProxySlot();
+  try {
+    try {
+      return await tryAllProxiesOnce(url, asJson, timeout);
+    } catch (firstErr) {
+      // Les proxys publics ont parfois des ratés transitoires (500, rate
+      // limit) — une seconde passe après une courte pause suffit souvent.
+      await sleep(1500);
+      return await tryAllProxiesOnce(url, asJson, timeout);
+    }
+  } finally {
+    releaseProxySlot();
+  }
+}
+
+/**
+ * Exécute fn sur chaque élément avec au plus `limit` appels concurrents —
+ * les proxys CORS publics gratuits tolèrent mal une rafale de requêtes
+ * parallèles (ils renvoient des erreurs ou du rate-limiting au-delà).
+ */
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const i = cursor++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(worker));
+  return results;
+}
+
+async function fetchDirect(url, { asJson = false, timeout = 6000 } = {}) {
+  const { promise, cleanup } = withTimeout((signal) => fetch(url, { signal }), timeout);
+  const res = await promise;
+  cleanup();
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  return asJson ? await res.json() : await res.text();
+}
+
+/* ------------------------------------------------------------------ Cache */
+
+const CACHE_PREFIX = "mit_cache_";
+
+function cacheSet(key, data) {
+  try {
+    localStorage.setItem(
+      CACHE_PREFIX + key,
+      JSON.stringify({ t: Date.now(), data })
+    );
+  } catch (e) {
+    /* stockage indisponible (navigation privée, etc.) — silencieux */
+  }
+}
+
+function cacheGet(key, maxAgeMs) {
+  try {
+    const raw = localStorage.getItem(CACHE_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (maxAgeMs && Date.now() - parsed.t > maxAgeMs) return null;
+    return parsed.data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function withCache(key, freshMs, staleMs, loader) {
+  try {
+    const data = await loader();
+    cacheSet(key, data);
+    STATE.sourceStatus[key] = "live";
+    return data;
+  } catch (err) {
+    const fresh = cacheGet(key, freshMs);
+    if (fresh) {
+      STATE.sourceStatus[key] = "live";
+      return fresh;
+    }
+    const stale = cacheGet(key, staleMs);
+    if (stale) {
+      STATE.sourceStatus[key] = "cache";
+      return stale;
+    }
+    STATE.sourceStatus[key] = "offline";
+    throw err;
+  }
+}
+
+/* ------------------------------------------------------------ Crypto (réel) */
+
+async function fetchCrypto() {
+  return withCache("crypto", 45_000, 3_600_000, async () => {
+    const [prices, global] = await Promise.all([
+      fetchDirect(
+        "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,solana,ripple&vs_currencies=usd&include_24hr_change=true",
+        { asJson: true }
+      ),
+      fetchDirect("https://api.coingecko.com/api/v3/global", { asJson: true }),
+    ]);
+    return { prices, global: global.data };
   });
 }
+
+/* --------------------------------------------------------- Change (réel, BCE) */
+
+async function fetchFX() {
+  return withCache("fx", 6 * 3_600_000, 24 * 3_600_000, async () => {
+    return fetchDirect(
+      "https://api.frankfurter.dev/v1/latest?from=EUR&to=USD,GBP,JPY,CHF",
+      { asJson: true }
+    );
+  });
+}
+
+/* --------------------------------------------------------- Indices (réel) */
+
+const INDEX_SYMBOLS = [
+  { symbol: "%5EGSPC", label: "S&P 500" },
+  { symbol: "%5EIXIC", label: "NASDAQ" },
+  { symbol: "%5EDJI", label: "DOW JONES" },
+  { symbol: "%5EFCHI", label: "CAC 40" },
+  { symbol: "%5EN225", label: "NIKKEI 225" },
+  { symbol: "%5EVIX", label: "VIX" },
+  { symbol: "CL%3DF", label: "PÉTROLE WTI" },
+  { symbol: "GC%3DF", label: "OR" },
+];
+
+async function fetchIndices() {
+  return withCache("indices", 60_000, 3_600_000, async () => {
+    const results = await mapLimit(INDEX_SYMBOLS, 3, async ({ symbol, label }) => {
+      try {
+        const data = await fetchViaProxies(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}`,
+          { asJson: true, timeout: 8000 }
+        );
+        const meta = data?.chart?.result?.[0]?.meta;
+        if (!meta) return null;
+        return {
+          label,
+          price: meta.regularMarketPrice,
+          changePct: meta.regularMarketChangePercent ?? 0,
+          currency: meta.currency,
+        };
+      } catch (e) {
+        return null;
+      }
+    });
+    const clean = results.filter(Boolean);
+    if (!clean.length) throw new Error("Aucun indice récupéré");
+    return clean;
+  });
+}
+
+/* -------------------------------------------------------- Actualités (réel) */
+
+const NEWS_CATEGORIES = [
+  { key: "BANQUES CENTRALES", query: "banque centrale taux directeur Fed BCE", baseline: "HIGH" },
+  { key: "GÉOPOLITIQUE", query: "géopolitique tensions internationales marchés", baseline: "HIGH" },
+  { key: "ÉNERGIE", query: "pétrole gaz OPEP énergie prix", baseline: "MEDIUM" },
+  { key: "MARCHÉS ACTIONS", query: "bourse Wall Street CAC 40 actions marchés", baseline: "MEDIUM" },
+  { key: "CRYPTO", query: "bitcoin crypto-monnaie marché", baseline: "MEDIUM" },
+  { key: "MATIÈRES PREMIÈRES", query: "matières premières or métaux marché", baseline: "LOW" },
+  { key: "CYBERSÉCURITÉ", query: "cyberattaque cybersécurité entreprises banques", baseline: "HIGH" },
+  { key: "COMMERCE INTERNATIONAL", query: "commerce international tarifs douaniers exportations", baseline: "MEDIUM" },
+];
+
+const IMPACT_RANK = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+const CRITICAL_WORDS = ["guerre", "krach", "effondrement", "invasion", "urgence", "défaut de paiement", "panique"];
+const ESCALATE_WORDS = ["hausse des taux", "baisse des taux", "sanctions", "récession", "choc", "tensions", "rupture", "attaque", "alerte"];
+
+function scoreImpact(title, baseline) {
+  const t = title.toLowerCase();
+  if (CRITICAL_WORDS.some((w) => t.includes(w))) return "CRITICAL";
+  let level = IMPACT_RANK[baseline] ?? 1;
+  if (ESCALATE_WORDS.some((w) => t.includes(w))) level = Math.min(level + 1, 3);
+  return Object.keys(IMPACT_RANK).find((k) => IMPACT_RANK[k] === level) || baseline;
+}
+
+function relativeTimeFr(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "";
+  const diffMs = Date.now() - d.getTime();
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return "à l'instant";
+  if (min < 60) return `il y a ${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `il y a ${h} h`;
+  const j = Math.floor(h / 24);
+  return `il y a ${j} j`;
+}
+
+function parseGoogleNewsRSS(xmlText, category) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, "text/xml");
+  const items = Array.from(doc.querySelectorAll("item")).slice(0, 6);
+  return items.map((item, i) => {
+    const rawTitle = item.querySelector("title")?.textContent || "";
+    const sourceEl = item.querySelector("source");
+    const sourceName = sourceEl?.textContent || "Google Actualités";
+    const link = item.querySelector("link")?.textContent || "#";
+    const pubDate = item.querySelector("pubDate")?.textContent || "";
+    let headline = rawTitle;
+    const suffix = " - " + sourceName;
+    if (headline.endsWith(suffix)) headline = headline.slice(0, -suffix.length);
+    return {
+      id: `${category.key}-${i}-${Date.parse(pubDate) || i}`,
+      category: category.key,
+      impact: scoreImpact(headline, category.baseline),
+      time: relativeTimeFr(pubDate),
+      timestamp: Date.parse(pubDate) || 0,
+      source: sourceName,
+      headline,
+      brief: `Dépêche réelle indexée via Google Actualités pour la catégorie ${category.key}. Cliquez « lire l'article complet » pour la source d'origine.`,
+      link,
+      tags: [category.key.split(" ")[0]],
+      live: true,
+    };
+  });
+}
+
+async function fetchNewsCategory(category) {
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(category.query)}&hl=fr&gl=FR&ceid=FR:fr`;
+  return withCache(`news_${category.key}`, 5 * 60_000, 6 * 3_600_000, async () => {
+    const xml = await fetchViaProxies(url, { timeout: 9000 });
+    const parsed = parseGoogleNewsRSS(xml, category);
+    if (!parsed.length) throw new Error("Flux vide");
+    return parsed;
+  });
+}
+
+/* Dernier recours : si le live ET le cache local échouent tous les deux
+   (proxy public en panne, première visite hors ligne...), on affiche ceci
+   plutôt qu'un panneau vide — clairement marqué comme archive, pas du direct. */
+const FALLBACK_FEED = [
+  {
+    id: "arc-1", category: "BANQUES CENTRALES", impact: "HIGH", time: "archive",
+    source: "ARCHIVE LOCALE", headline: "La Fed et la BCE sous surveillance rapprochée des marchés de taux",
+    brief: "Contenu d'archive affiché car les flux en direct sont temporairement injoignables. Réessayez dans quelques instants ou tapez « actualiser » dans la console.",
+    tags: ["TAUX"], live: false,
+  },
+  {
+    id: "arc-2", category: "GÉOPOLITIQUE", impact: "HIGH", time: "archive",
+    source: "ARCHIVE LOCALE", headline: "Tensions géopolitiques persistantes sur les corridors énergétiques mondiaux",
+    brief: "Contenu d'archive — connexion aux flux réels indisponible pour le moment.",
+    tags: ["RISQUE"], live: false,
+  },
+  {
+    id: "arc-3", category: "ÉNERGIE", impact: "MEDIUM", time: "archive",
+    source: "ARCHIVE LOCALE", headline: "Marchés pétroliers attentifs aux décisions de production de l'OPEP+",
+    brief: "Contenu d'archive — connexion aux flux réels indisponible pour le moment.",
+    tags: ["ÉNERGIE"], live: false,
+  },
+  {
+    id: "arc-4", category: "MARCHÉS ACTIONS", impact: "MEDIUM", time: "archive",
+    source: "ARCHIVE LOCALE", headline: "Wall Street et les places européennes évoluent au gré des résultats d'entreprises",
+    brief: "Contenu d'archive — connexion aux flux réels indisponible pour le moment.",
+    tags: ["ACTIONS"], live: false,
+  },
+  {
+    id: "arc-5", category: "CRYPTO", impact: "MEDIUM", time: "archive",
+    source: "ARCHIVE LOCALE", headline: "Le bitcoin et les grandes cryptomonnaies restent sous forte volatilité",
+    brief: "Contenu d'archive — connexion aux flux réels indisponible pour le moment.",
+    tags: ["CRYPTO"], live: false,
+  },
+];
+
+async function fetchIntelFeed() {
+  const results = await mapLimit(NEWS_CATEGORIES, 3, async (cat) => {
+    try {
+      return await fetchNewsCategory(cat);
+    } catch (e) {
+      return [];
+    }
+  });
+  const merged = results.flat();
+  if (!merged.length) throw new Error("Toutes les catégories ont échoué");
+  merged.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  return merged;
+}
+
+/* --------------------------------------------------- Agenda macro (réel, dates vérifiées) */
+/* Sources : federalreserve.gov/monetarypolicy/fomccalendars.htm,
+   ecb.europa.eu/press/calendars/mgcgc, bls.gov (calendrier CPI 2026). */
+
+const WATCHLIST = [
+  { label: "DÉCISION DE TAUX — FOMC (FED)", target: "2026-09-16T18:00:00Z", tag: "TAUX" },
+  { label: "RAPPORT EMPLOI US (NFP)", target: "2026-10-02T12:30:00Z", tag: "EMPLOI" },
+  { label: "INFLATION US (CPI, SEPT.)", target: "2026-10-14T12:30:00Z", tag: "INFLATION" },
+  { label: "RÉUNION BCE — TAUX DIRECTEURS", target: "2026-10-29T13:15:00Z", tag: "TAUX" },
+  { label: "FOMC (FED) — RÉUNION SUIVANTE", target: "2026-10-28T18:00:00Z", tag: "TAUX" },
+];
+
+/* -------------------------------------------------- Carte des points chauds */
+/* Zones à risque suivies par les desks macro/géopolitique — évaluation
+   éditoriale statique (pas un flux temps réel), utile comme repère visuel. */
+
+const HOTSPOTS = [
+  { name: "DÉTROIT D'ORMUZ", x: 63.5, y: 44, note: "Verrou pétrolier — activité navale accrue", level: "HIGH" },
+  { name: "DÉTROIT DE TAÏWAN", x: 79.5, y: 46, note: "Corridor à risque pour la chaîne semi-conducteurs", level: "MEDIUM" },
+  { name: "WASHINGTON D.C.", x: 27, y: 34, note: "Épicentre politique Fed / budget fédéral", level: "CRITICAL" },
+  { name: "BRUXELLES", x: 47.5, y: 27, note: "BCE / coordination budgétaire européenne", level: "MEDIUM" },
+  { name: "CANAL DE SUEZ", x: 54, y: 42, note: "Verrou du commerce mondial", level: "MEDIUM" },
+  { name: "MER DE CHINE MÉRIDIONALE", x: 77, y: 51, note: "Tensions sur les routes maritimes", level: "MEDIUM" },
+  { name: "MOSCOU", x: 56, y: 24, note: "Risque sur la politique d'exportation énergétique", level: "HIGH" },
+];
+
+/* -------------------------------------------------------------- Journal système */
+
+const TERMINAL_LOG_LINES = [
+  "connexion au flux Google Actualités...",
+  "requête CoinGecko [BTC, ETH, SOL, XRP]...",
+  "synchronisation taux de référence BCE (Frankfurter)...",
+  "récupération indices Yahoo Finance...",
+  "analyse lexicale des titres (FR) en cours...",
+  "recalcul de l'indice de risque via le VIX...",
+  "vérification du calendrier macro (Fed / BCE / BLS)...",
+  "aucune anomalie détectée sur les flux...",
+  "mise en cache locale des dernières données...",
+  "point de contrôle système écrit...",
+];

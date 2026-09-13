@@ -1,95 +1,121 @@
-# MARKET INTEL // CLASSIFIED
+# INTEL MARCHÉS // CLASSIFIÉ
 
-A "classified intelligence terminal" styled dashboard for tracking news that
-moves financial markets — built to feel like the black-ops-briefing look of
-geopolitics-explainer video content (glitch title, scanlines, matrix rain,
-redacted headlines, a DEFCON-style risk gauge, a hotspot map, a live ticker,
-and a scrolling system log) while staying genuinely useful: category filters,
-a catalyst countdown watchlist, and expandable briefs for each headline.
+A classified-intelligence-terminal styled dashboard (glitch title, scanlines,
+matrix rain, a DEFCON-style risk gauge, a hotspot map, a live ticker, and an
+interactive command-line console) for tracking news and data that moves
+financial markets. **The site's UI is in French.** This README (developer
+docs) is in English.
 
-**This is a front-end shell with sample data.** Wire it to a real feed in a
-few minutes — see "Going live" below.
+Unlike the first version, this one is wired to **real, live public data** —
+no sample placeholders in production:
+
+| Data | Source | Notes |
+|---|---|---|
+| Headlines (8 categories) | Google Actualités (RSS), `hl=fr` | Real, clickable, refreshed every 5 min |
+| Crypto prices (BTC/ETH/SOL/XRP) | CoinGecko | Real, refreshed every 60 s |
+| FX rates (EUR→USD/GBP/JPY/CHF) | Frankfurter.dev (ECB reference rates) | Real, daily |
+| Indices, VIX, oil, gold | Yahoo Finance chart API | Real, refreshed every 60 s |
+| Risk gauge | Computed live from the VIX | Not a fixed value — see thresholds below |
+| Macro calendar (Fed/ECB/NFP/CPI) | Hardcoded, but from verified real dates | See sources at the bottom of `data.js` |
+| Hotspot map | Curated editorial list | Static — not a live feed |
+
+No API keys required for any of this — all sources are free, public, no-auth
+endpoints. That's also the one real caveat, explained below.
 
 ## Run it
 
-No build step. Just open `index.html` in a browser, or serve the folder:
+No build step. Open `index.html` in a browser, or serve the folder:
 
 ```bash
 python3 -m http.server 8000
 # then visit http://localhost:8000
 ```
 
-## What's inside
+## Architecture
 
 ```
-index.html          Page structure
-assets/style.css     Visual system (colors, glitch/scanline/matrix FX, layout)
-assets/script.js      Behavior: boot sequence, ticker, threat gauge, feed
-                       rendering, countdowns, map, terminal log
-assets/data.js         Sample data + fetchIntelFeed() — the one function to
-                       replace with a real API call
+index.html          Page structure (French UI strings)
+assets/style.css     Visual system + the new terminal-console input styling
+assets/script.js      Rendering, refresh loops, VIX-based risk gauge,
+                       command-line console (aide/statut/actualiser/...)
+assets/data.js         All data fetching: proxy chain, caching, per-source
+                       fetchXxx() functions, the hardcoded macro calendar
 ```
 
-## Going live: plugging in a real news feed
+### Why a CORS proxy chain?
 
-Everything renders from the array returned by `fetchIntelFeed()` in
-`assets/data.js`. Replace the sample implementation with a real call, as long
-as you resolve to an array shaped like `SAMPLE_FEED`:
+Google News RSS, and Yahoo Finance's chart API, don't send
+`Access-Control-Allow-Origin` headers, so a browser can't call them directly
+from a static site. `assets/data.js` routes those two sources through a
+small chain of free public CORS proxies (`api.allorigins.win`,
+`api.codetabs.com`, `cors.eu.org`), tried in order, each with a timeout and
+one retry pass. CoinGecko and Frankfurter.dev *do* send proper CORS headers,
+so those are called directly — no proxy needed.
 
-```js
-async function fetchIntelFeed() {
-  const res = await fetch("https://your-api-or-proxy/news");
-  const raw = await res.json();
-  return raw.map(item => ({
-    id: item.id,
-    category: item.category,       // e.g. "CENTRAL BANKS", "GEOPOLITICS", "ENERGY"
-    impact: item.impact,           // "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
-    time: item.time,
-    source: item.source,
-    headline: item.headline,
-    brief: item.summary,
-    tags: item.tags,
-  }));
-}
+**These proxies are free, third-party, and have no uptime guarantee.** In
+testing they mostly worked well, but occasionally returned 500s or briefly
+rate-limited under bursts of concurrent requests. The code defends against
+this on three levels:
+
+1. **A global concurrency semaphore** (`PROXY_CONCURRENCY = 2` in
+   `data.js`) — at most 2 proxy requests are ever in flight at once, across
+   *all* features combined, so indices and news don't stampede the proxy
+   together on page load.
+2. **`localStorage` caching per source** — a successful fetch is cached;
+   if the next live fetch fails, the last good value (up to a few hours
+   old) is served instead, and the UI marks it "CACHE" rather than "EN
+   DIRECT".
+3. **A tiny bundled French fallback feed** (`FALLBACK_FEED` in `data.js`)
+   — shown only if both the live fetch and the cache are empty (e.g. first
+   visit, proxies down), clearly labeled `ARCHIVE LOCALE` so it's never
+   mistaken for live content.
+
+For a production deployment where reliability matters more, swap the proxy
+chain for a small serverless function you control (Cloudflare Worker,
+Vercel/Netlify function) that fetches these feeds server-side — same shape
+of data, no dependency on third-party CORS proxies.
+
+### The console
+
+The "CONSOLE SYSTÈME" panel is a real command line, not just decoration.
+Type into it:
+
+- `aide` — list commands
+- `statut` — live/cache/offline status of every data source
+- `actualiser` — force a full resync
+- `niveau` — explains the current risk level and its VIX thresholds
+- `matrice` — toggles the matrix-rain intensity
+- `effacer` — clears the console
+- `propos` — about this terminal
+
+### Risk gauge thresholds (VIX-based)
+
+```
+VIX < 14        → FAIBLE      (LOW)
+14 ≤ VIX < 19   → SURVEILLÉ   (GUARDED)
+19 ≤ VIX < 25   → ÉLEVÉ       (ELEVATED)
+25 ≤ VIX < 35   → SÉVÈRE      (HIGH)
+VIX ≥ 35        → CRITIQUE    (SEVERE)
 ```
 
-Options for a real source:
+### Macro calendar dates
 
-- **NewsAPI.org** — broad headline coverage, free tier for dev.
-- **Finnhub market news** — finance-specific, has a free tier.
-- **GNews** — simple headline API.
-- **Alpha Vantage News & Sentiment** — includes a sentiment score you could
-  map to `impact`.
-- Any RSS feed (Reuters, Bloomberg, central bank press releases) — proxy it
-  through a small serverless function to avoid CORS issues and to keep your
-  API key off the client.
+Hardcoded in `WATCHLIST` (`assets/data.js`) because these are pre-announced
+official dates, not something that needs live polling. Verified against:
+- [federalreserve.gov — FOMC meeting calendars](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm)
+- [ecb.europa.eu — Governing Council meeting schedule](https://www.ecb.europa.eu/press/calendars/mgcgc/html/index.en.html)
+- [bls.gov — CPI release schedule](https://www.bls.gov/schedule/news_release/cpi.htm)
 
-Because most news APIs require a server-side key (CORS + secrecy), the
-cleanest setup is a tiny proxy (Cloudflare Worker, Vercel/Netlify function,
-or a one-route Express app) that `fetchIntelFeed()` calls — keeping this
-static front end deployable as-is on GitHub Pages while the proxy does the
-real fetching.
-
-The **ticker** (`SAMPLE_TICKER`), **watchlist** (`WATCHLIST`), and **hotspot
-map** (`HOTSPOTS`) in `assets/data.js` are separate arrays — wire each to a
-market-data API (e.g. a quotes endpoint) or an economic calendar API
-independently of the news feed.
+Update these manually a few times a year when new schedules are published.
 
 ## Deploying
 
-Static site, so GitHub Pages works out of the box:
-
-```bash
-# from the repo root, on the branch you want published
-git checkout -b gh-pages
-git push origin gh-pages
-```
-
-Then enable Pages for that branch in the repo settings.
+Static site, so GitHub Pages works out of the box — see repo Settings →
+Pages → Deploy from branch.
 
 ## Disclaimer
 
-Sample data ships with the repo for demo purposes and is fictional. This is
-a UI shell, not a licensed data product — treat any content as
-situational-awareness inspiration, not investment advice, until you've wired
-in real, licensed sources.
+This aggregates real public headlines and market data for situational
+awareness — it is not a licensed data terminal and not investment advice.
+Google News RSS results reflect whatever Google's index surfaces for each
+query; always check the linked source before acting on anything.
